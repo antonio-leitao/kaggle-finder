@@ -1,0 +1,50 @@
+name: Refresh competitions data
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. Meta Kaggle itself updates ~weekly.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install kaggle
+
+      - name: Download Meta Kaggle files
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          mkdir -p meta-kaggle
+          for f in Tags.csv Competitions.csv CompetitionTags.csv; do
+            kaggle datasets download kaggle/meta-kaggle -f "$f" -p meta-kaggle --unzip
+          done
+
+      - name: Build competitions.json
+        run: python scripts/build.py --csv-dir meta-kaggle --out static/data/competitions.json
+
+      - name: Clean up CSVs
+        run: rm -rf meta-kaggle
+
+      - name: Commit if changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if git diff --quiet -- static/data/competitions.json; then
+            echo 'No changes.'
+          else
+            git add static/data/competitions.json
+            git commit -m "data: refresh $(date -u +%Y-%m-%d)"
+            git push
+          fi
