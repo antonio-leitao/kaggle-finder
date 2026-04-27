@@ -14,7 +14,12 @@
 
   const tagsByGroup: Record<TagGroup, Tag[]> = $derived.by(() => {
     const out: Record<TagGroup, Tag[]> = { data: [], task: [], domain: [] };
-    for (const t of data.tags) out[t.group].push(t);
+    for (const t of data.tags) {
+      // Tolerate unexpected/legacy group values rather than crashing.
+      if (t.group === 'data' || t.group === 'task' || t.group === 'domain') {
+        out[t.group].push(t);
+      }
+    }
     return out;
   });
 
