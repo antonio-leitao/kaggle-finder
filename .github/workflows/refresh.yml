@@ -3,7 +3,7 @@ name: Refresh competitions data
 on:
   schedule:
     # Mondays 06:00 UTC. Meta Kaggle itself updates ~weekly.
-    - cron: '0 6 * * 1'
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - run: pip install kaggle
 

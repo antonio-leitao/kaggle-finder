@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Competition, Tag } from '$lib/types';
-  import { competitionUrl, formatMeta, thumbUrl } from '$lib/search';
+  import { competitionUrl, formatMeta } from '$lib/search';
 
   interface Props {
     competition: Competition;
@@ -9,14 +9,10 @@
 
   let { competition: c, tagsByslug }: Props = $props();
 
-  // The Kaggle thumbnail bucket isn't 100% complete; if it 404s, fall back to a
-  // colored monogram tile keyed off the slug.
-  let imgFailed = $state(false);
-
   const monogram = $derived(c.title.replace(/[^A-Za-z]/g, '').slice(0, 2).toUpperCase() || '??');
 
   // Deterministic color from the slug so the same competition always gets the
-  // same fallback color across renders.
+  // same tile color across renders.
   const palette = ['c-blue', 'c-teal', 'c-amber', 'c-coral', 'c-purple'];
   const colorClass = $derived(palette[hash(c.slug) % palette.length]);
 
@@ -31,17 +27,7 @@
 </script>
 
 <a class="card" href={competitionUrl(c.slug)} target="_blank" rel="noopener noreferrer">
-  {#if imgFailed}
-    <div class="thumb {colorClass}" aria-hidden="true">{monogram}</div>
-  {:else}
-    <img
-      class="thumb-img"
-      src={thumbUrl(c.id)}
-      alt=""
-      loading="lazy"
-      onerror={() => (imgFailed = true)}
-    />
-  {/if}
+  <div class="thumb {colorClass}" aria-hidden="true">{monogram}</div>
 
   <div class="content">
     <h3 class="title">{c.title}</h3>
@@ -69,16 +55,12 @@
   }
   .card:hover .title { color: var(--text-info); }
 
-  .thumb,
-  .thumb-img {
+  .thumb {
     width: 76px;
     height: 76px;
     flex-shrink: 0;
     border-radius: var(--radius-md);
     background: var(--bg-secondary);
-    object-fit: cover;
-  }
-  .thumb {
     display: flex;
     align-items: center;
     justify-content: center;

@@ -14,7 +14,7 @@
 
   // Group tags by their bucket once. Stable order preserved from JSON.
   const tagsByGroup: Record<TagGroup, Tag[]> = $derived.by(() => {
-    const out: Record<TagGroup, Tag[]> = { data: [], task: [], domain: [] };
+    const out: Record<TagGroup, Tag[]> = { data: [], task: [], domain: [], other: [] };
     for (const t of data.tags) out[t.group].push(t);
     return out;
   });
@@ -44,6 +44,7 @@
       query.data.selected.length > 0 ||
       query.task.selected.length > 0 ||
       query.domain.selected.length > 0 ||
+      query.other.selected.length > 0 ||
       query.rewardType !== '' ||
       query.metricContains !== ''
   );
@@ -107,6 +108,17 @@
     mode={query.domain.mode}
     onChange={(next) => updateFacet('domain', next)}
   />
+
+  {#if tagsByGroup.other.length > 0}
+    <FacetSection
+      label="Other"
+      optional
+      tags={tagsByGroup.other}
+      selected={query.other.selected}
+      mode={query.other.mode}
+      onChange={(next) => updateFacet('other', next)}
+    />
+  {/if}
 
   <div class="misc">
     <div class="field">
