@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Build static/data/competitions.json from a Meta Kaggle dump.
 
-Reads three CSVs from --csv-dir (Tags.csv, Competitions.csv, CompetitionTags.csv),
-keeps every finalized competition, and projects the fields the UI needs.
+Reads three CSVs from --csv-dir and projects fields the UI needs.
 
-Tag taxonomy:
-- Curated tags get hand-picked names and group assignments (data/task/domain).
-- Every other tag found on a finalized competition is included automatically
-  with group='other' and `Name` from Meta Kaggle as the display name.
-
-This way no competition is dropped for being tagged with off-piste tags,
-and the curated facets stay clean.
+Tag routing:
+- Each Kaggle tag has a FullPath (e.g. "subject > biology", "data type > image").
+  We map the top-level FullPath segment to one of our three facets:
+    data type             -> data
+    task                  -> task
+    technique             -> task     (mostly task-shaped: "time series",
+                                       "computer vision", "recommender systems")
+    subject               -> domain
+    geography and places  -> domain
+    language              -> domain
+- Tags under audience / packages / architecture / analysis are dropped — they
+  describe who or how, not what the problem is.
+- Within each facet, the most-frequent tags become chips. Anything below the
+  threshold collapses into a single "{facet}-other" tag the UI shows as a
+  single chip per facet, but the chip's slug-set covers the whole long tail.
 """
 from __future__ import annotations
 
@@ -22,101 +29,55 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Curated taxonomy: hand-picked tags get a clean display name and group.
-# Slugs match Meta Kaggle's `tags.Slug` exactly. Anything not in here that
-# appears on a finalized competition still gets included, but goes into the
-# generic "other" bucket using its raw Name.
-CURATED: dict[str, dict[str, str]] = {
-    # ---- data ----
-    "tabular": {"name": "tabular", "group": "data"},
-    "time-series": {"name": "time series", "group": "data"},
-    "image-data": {"name": "image data", "group": "data"},
-    "text-data": {"name": "text data", "group": "data"},
-    "audio-data": {"name": "audio data", "group": "data"},
-    "video": {"name": "video", "group": "data"},
-    "sequential": {"name": "sequential", "group": "data"},
-    "geospatial": {"name": "geospatial", "group": "data"},
-    "graphs": {"name": "graphs", "group": "data"},
-    # ---- task ----
-    "binary-classification": {"name": "binary classification", "group": "task"},
-    "multiclass-classification": {"name": "multiclass classification", "group": "task"},
-    "multilabel-classification": {"name": "multilabel classification", "group": "task"},
-    "classification": {"name": "classification", "group": "task"},
-    "regression": {"name": "regression", "group": "task"},
-    "forecasting": {"name": "forecasting", "group": "task"},
-    "anomaly-detection": {"name": "anomaly detection", "group": "task"},
-    "object-detection": {"name": "object detection", "group": "task"},
-    "semantic-segmentation": {"name": "semantic segmentation", "group": "task"},
-    "instance-segmentation": {"name": "instance segmentation", "group": "task"},
-    "ranking": {"name": "ranking", "group": "task"},
-    "recommender-systems": {"name": "recommender systems", "group": "task"},
-    "clustering": {"name": "clustering", "group": "task"},
-    "nlp": {"name": "nlp", "group": "task"},
-    "computer-vision": {"name": "computer vision", "group": "task"},
-    "reinforcement-learning": {"name": "reinforcement learning", "group": "task"},
-    "generative-modeling": {"name": "generative modeling", "group": "task"},
-    # ---- domain ----
-    "healthcare": {"name": "healthcare", "group": "domain"},
-    "medicine": {"name": "medicine", "group": "domain"},
-    "biology": {"name": "biology", "group": "domain"},
-    "chemistry": {"name": "chemistry", "group": "domain"},
-    "physics": {"name": "physics", "group": "domain"},
-    "astronomy": {"name": "astronomy", "group": "domain"},
-    "earth-and-nature": {"name": "earth and nature", "group": "domain"},
-    "environment": {"name": "environment", "group": "domain"},
-    "finance": {"name": "finance", "group": "domain"},
-    "economics": {"name": "economics", "group": "domain"},
-    "manufacturing": {"name": "manufacturing", "group": "domain"},
-    "automobile": {"name": "automobile", "group": "domain"},
-    "transportation": {"name": "transportation", "group": "domain"},
-    "internet": {"name": "internet", "group": "domain"},
-    "social-science": {"name": "social science", "group": "domain"},
-    "education": {"name": "education", "group": "domain"},
-    "energy": {"name": "energy", "group": "domain"},
-    "retail-and-shopping": {"name": "retail and shopping", "group": "domain"},
-    "arts-and-entertainment": {"name": "arts and entertainment", "group": "domain"},
-    "gaming": {"name": "gaming", "group": "domain"},
-    "sports": {"name": "sports", "group": "domain"},
-    "law-and-government": {"name": "law and government", "group": "domain"},
-    "agriculture": {"name": "agriculture", "group": "domain"},
-    "food": {"name": "food", "group": "domain"},
+# Tags below this competition count get collapsed into the per-facet "other"
+# chip. From the data this gives ~6 data, ~7 task, ~25 domain chips.
+OTHER_THRESHOLD = 5
+
+# How a tag's top-level FullPath segment routes to one of our facets.
+# Anything not in this map is dropped entirely.
+PATH_TO_FACET: dict[str, str] = {
+    "data type": "data",
+    "task": "task",
+    "technique": "task",
+    "analysis": "task",
+    "subject": "domain",
+    "geography and places": "domain",
+    "language": "domain",
 }
 
-# Tags we never want to surface (technique/process tags, not subject matter).
-# Stripped from the competition's tagSlugs entirely.
-BLOCKLIST: set[str] = {
-    "beginner",
-    "intermediate",
-    "advanced",
-    "tutorial",
-    "tutorials",
-    "starter-code",
-    "feature-engineering",
-    "model-comparison",
-    "ensembling",
-    "data-cleaning",
-    "exploratory-data-analysis",
-    "data-visualization",
-    "automl",
-    "deep-learning",
-    "transfer-learning",
-    "neural-networks",
-    "xgboost",
-    "lightgbm",
-    "random-forest",
-    "logistic-regression",
-    "linear-regression",
-    "k-means",
-    "decision-tree",
-    "svm",
-    "lstm",
-    "gru",
-    "transformers",
-    "bert",
-    "gpt",
-    "rnns",
-    "cnns",
-    "kaggle",
+# Per-tag overrides: some tags Meta Kaggle put in one bucket but actually
+# belong elsewhere (or shouldn't be surfaced) for our purposes.
+SLUG_OVERRIDES: dict[str, str] = {
+    # technique tags that aren't really tasks
+    "deep-learning": "DROP",
+    "transfer-learning": "DROP",
+    "neural-networks": "DROP",
+    "ensembling": "DROP",
+    "model-comparison": "DROP",
+    "transformer": "DROP",
+    "graph-neural-network": "DROP",
+    # analysis tags that are noise, not task descriptors
+    "data-cleaning": "DROP",
+    "survey-analysis": "DROP",
+    "statistical-analysis": "DROP",
+    "exploratory-data-analysis": "DROP",
+    "data-visualization": "DROP",
+    # data-type-ish things
+    "graph-data": "data",
+    "multimodal-data": "data",
+}
+
+# Tag display-name overrides (slug -> nicer display name).
+NAME_OVERRIDES: dict[str, str] = {
+    "tabular-data": "tabular",
+    "image-data": "image",
+    "text-data": "text",
+    "audio-data": "audio",
+    "video-data": "video",
+    "graph-data": "graph",
+    "multimodal-data": "multimodal",
+    "image-processing": "computer vision",
+    "time-series-analysis": "time series",
 }
 
 
@@ -153,8 +114,21 @@ def is_truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in {"true", "1", "yes"}
 
 
-def humanize(slug: str) -> str:
-    return slug.replace("-", " ").strip()
+def route(slug: str, fullpath: str) -> str | None:
+    """Return one of {'data','task','domain'} or None if the tag is dropped."""
+    if slug in SLUG_OVERRIDES:
+        v = SLUG_OVERRIDES[slug]
+        return None if v == "DROP" else v
+    if not fullpath:
+        return None
+    top = fullpath.split(">", 1)[0].strip().lower()
+    return PATH_TO_FACET.get(top)
+
+
+def display_name(slug: str, raw_name: str) -> str:
+    if slug in NAME_OVERRIDES:
+        return NAME_OVERRIDES[slug]
+    return (raw_name or slug.replace("-", " ")).strip().lower()
 
 
 def build(csv_dir: Path, out: Path) -> None:
@@ -165,16 +139,18 @@ def build(csv_dir: Path, out: Path) -> None:
         if not p.exists():
             sys.exit(f"missing {p}")
 
-    # 1. Tags table: TagId -> (slug, raw Name).
-    tag_meta: dict[int, tuple[str, str]] = {}
+    # 1. Tags table -> TagId -> (slug, display_name, facet | None).
+    tag_meta: dict[int, tuple[str, str, str | None]] = {}
     for row in read_csv(tags_path):
         tid = parse_int(row.get("Id"))
         slug = (row.get("Slug") or "").strip().lower()
-        name = (row.get("Name") or "").strip()
-        if tid is not None and slug:
-            tag_meta[tid] = (slug, name or humanize(slug))
+        if tid is None or not slug:
+            continue
+        name = display_name(slug, (row.get("Name") or "").strip())
+        facet = route(slug, (row.get("FullPath") or "").strip())
+        tag_meta[tid] = (slug, name, facet)
 
-    # 2. Competition -> set of tag slugs (after blocklist filtering).
+    # 2. Competition -> set of (slug, facet) for tags that survived routing.
     comp_tags: dict[int, set[str]] = {}
     for row in read_csv(ct_path):
         cid = parse_int(row.get("CompetitionId"))
@@ -184,22 +160,75 @@ def build(csv_dir: Path, out: Path) -> None:
         meta = tag_meta.get(tid)
         if meta is None:
             continue
-        slug = meta[0]
-        if slug in BLOCKLIST:
+        slug, _, facet = meta
+        if facet is None:
             continue
         comp_tags.setdefault(cid, set()).add(slug)
 
-    # 3. Build the competition rows. Keep ALL finalized regardless of tags.
-    competitions: list[dict] = []
-    used_slugs: set[str] = set()
+    # 3. Tag frequencies on finalized competitions.
+    finalized_ids: set[int] = set()
+    comp_rows: list[dict] = []
     for row in read_csv(comp_path):
         if not is_truthy(row.get("FinalLeaderboardHasBeenVerified")):
             continue
         cid = parse_int(row.get("Id"))
         if cid is None:
             continue
-        slugs = sorted(comp_tags.get(cid, set()))
-        used_slugs.update(slugs)
+        finalized_ids.add(cid)
+        comp_rows.append(row)
+
+    freq: Counter[str] = Counter()
+    for cid in finalized_ids:
+        for slug in comp_tags.get(cid, ()):
+            freq[slug] += 1
+
+    # 4. Decide per-tag whether it's a chip or part of the facet's "other"
+    # bucket. Build slug -> {chip_slug, facet, name}, where chip_slug is either
+    # the original slug (popular tag) or "{facet}-other".
+    OTHER_SLUGS = {"data": "data-other", "task": "task-other", "domain": "domain-other"}
+
+    slug_to_chip: dict[str, str] = {}
+    chip_def: dict[str, dict] = {}  # chip_slug -> {name, facet}
+    chip_member_slugs: dict[str, set[str]] = {}  # chip_slug -> set of real slugs
+    chip_member_names: dict[str, list[str]] = {}  # for searchability of "other" chips
+
+    for tid, (slug, name, facet) in tag_meta.items():
+        if facet is None:
+            continue
+        if slug not in freq:
+            continue  # not used by any finalized comp
+        n = freq[slug]
+        if n >= OTHER_THRESHOLD:
+            chip = slug
+            chip_def[chip] = {"name": name, "facet": facet}
+            chip_member_slugs.setdefault(chip, set()).add(slug)
+            chip_member_names.setdefault(chip, []).append(name)
+        else:
+            chip = OTHER_SLUGS[facet]
+            chip_def[chip] = {"name": "other", "facet": facet}
+            chip_member_slugs.setdefault(chip, set()).add(slug)
+            chip_member_names.setdefault(chip, []).append(name)
+        slug_to_chip[slug] = chip
+
+    # 5. Build the competition rows. Each comp's tagSlugs becomes the *chip*
+    # slugs it maps to (deduped), so the UI selecting "domain-other" matches
+    # any comp tagged with a long-tail domain tag.
+    slug_to_name: dict[str, str] = {
+        slug_: name_ for slug_, name_, _ in tag_meta.values()
+    }
+
+    competitions: list[dict] = []
+    for row in comp_rows:
+        cid = parse_int(row["Id"])
+        raw_slugs = comp_tags.get(cid, set())
+        chips: set[str] = set()
+        for slug in raw_slugs:
+            chip = slug_to_chip.get(slug)
+            if chip:
+                chips.add(chip)
+        # tagText: all tag display names (including long-tail ones the UI
+        # collapsed into "other") joined for substring search.
+        tag_text = " ".join(sorted({slug_to_name.get(s, s) for s in raw_slugs}))
         competitions.append(
             {
                 "id": cid,
@@ -215,7 +244,8 @@ def build(csv_dir: Path, out: Path) -> None:
                 or None,
                 "rewardType": (row.get("RewardType") or "").strip() or None,
                 "rewardQuantity": parse_float(row.get("RewardQuantity")),
-                "tagSlugs": slugs,
+                "tagSlugs": sorted(chips),
+                "tagText": tag_text,
             }
         )
 
@@ -224,32 +254,32 @@ def build(csv_dir: Path, out: Path) -> None:
         reverse=True,
     )
 
-    # 4. Tags list: curated first (in declared order, only those actually
-    # used), then 'other' tags by usage frequency desc.
-    used_freq: Counter[str] = Counter()
-    for c in competitions:
-        used_freq.update(c["tagSlugs"])
+    # 6. Tags list: chips ordered (data first, then task, then domain), within
+    # each group: real chips by frequency desc, then the "other" chip last.
+    facet_order = ["data", "task", "domain"]
+    chips_by_facet: dict[str, list[tuple[str, dict]]] = {f: [] for f in facet_order}
+    for chip, defn in chip_def.items():
+        chips_by_facet[defn["facet"]].append((chip, defn))
 
     tags_out: list[dict] = []
-    seen: set[str] = set()
-
-    for slug, meta in CURATED.items():
-        if slug in used_slugs:
+    for facet in facet_order:
+        items = chips_by_facet[facet]
+        # Real (non-other) chips first by total uses across their members.
+        real = [(c, d) for c, d in items if not c.endswith("-other")]
+        other = [(c, d) for c, d in items if c.endswith("-other")]
+        real.sort(key=lambda cd: -sum(freq[s] for s in chip_member_slugs[cd[0]]))
+        for chip, defn in real:
+            tags_out.append({"slug": chip, "name": defn["name"], "group": facet})
+        for chip, defn in other:
+            n_other_tags = len(chip_member_slugs[chip])
             tags_out.append(
-                {"slug": slug, "name": meta["name"], "group": meta["group"]}
+                {
+                    "slug": chip,
+                    "name": "other",
+                    "group": facet,
+                    "otherCount": n_other_tags,
+                }
             )
-            seen.add(slug)
-
-    # Display name lookup (any tag_meta entry with this slug).
-    slug_to_name = {s: n for (s, n) in tag_meta.values()}
-
-    other_slugs = sorted(
-        used_slugs - seen,
-        key=lambda s: (-used_freq[s], s),
-    )
-    for slug in other_slugs:
-        display = slug_to_name.get(slug) or humanize(slug)
-        tags_out.append({"slug": slug, "name": display.lower(), "group": "other"})
 
     bundle = {
         "generatedAt": datetime.now(timezone.utc)
@@ -264,12 +294,10 @@ def build(csv_dir: Path, out: Path) -> None:
         json.dump(bundle, fh, ensure_ascii=False, separators=(",", ":"))
 
     size_mb = out.stat().st_size / 1_048_576
-    n_curated = sum(1 for t in tags_out if t["group"] != "other")
-    n_other = len(tags_out) - n_curated
+    by_g = Counter(t["group"] for t in tags_out)
     print(
         f"wrote {len(competitions)} competitions, "
-        f"{n_curated} curated tags + {n_other} other "
-        f"({size_mb:.2f} MB) to {out}",
+        f"chips: {dict(by_g)} ({size_mb:.2f} MB) -> {out}",
         file=sys.stderr,
     )
 

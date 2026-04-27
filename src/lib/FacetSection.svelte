@@ -52,9 +52,10 @@
         type="button"
         class="chip"
         class:on={selected.includes(t.slug)}
+        class:other={t.slug.endsWith('-other')}
         aria-pressed={selected.includes(t.slug)}
         onclick={() => toggle(t.slug)}
-      >{t.name}</button>
+      >{t.name}{#if t.otherCount}<span class="count"> ·&nbsp;{t.otherCount}</span>{/if}</button>
     {/each}
   </div>
 </section>
@@ -135,5 +136,14 @@
     color: var(--text-info);
     border-color: transparent;
     font-weight: 500;
+  }
+  .chip.other {
+    font-style: italic;
+  }
+  .count {
+    font-style: normal;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    opacity: 0.7;
   }
 </style>

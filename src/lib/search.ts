@@ -24,7 +24,9 @@ function textMatch(c: Competition, needle: string): boolean {
     " " +
     (c.subtitle ?? "") +
     " " +
-    (c.metricDescription ?? "")
+    (c.metricDescription ?? "") +
+    " " +
+    (c.tagText ?? "")
   ).toLowerCase();
   return hay.includes(n);
 }
@@ -35,7 +37,6 @@ export function search(corpus: Competition[], q: QueryState): Competition[] {
     if (!matchTags(tags, q.data.selected, q.data.mode)) return false;
     if (!matchTags(tags, q.task.selected, q.task.mode)) return false;
     if (!matchTags(tags, q.domain.selected, q.domain.mode)) return false;
-    if (!matchTags(tags, q.other.selected, q.other.mode)) return false;
 
     if (q.rewardType && c.rewardType !== q.rewardType) return false;
 
